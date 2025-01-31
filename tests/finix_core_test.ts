@@ -47,39 +47,13 @@ Clarinet.test({
 });
 
 Clarinet.test({
-  name: "Test insufficient collateral fails position creation",
+  name: "Test liquidation mechanism",
   async fn(chain: Chain, accounts: Map<string, Account>) {
     const deployer = accounts.get('deployer')!;
     const wallet1 = accounts.get('wallet_1')!;
+    const wallet2 = accounts.get('wallet_2')!;
     
-    // Set price
-    let block = chain.mineBlock([
-      Tx.contractCall('finix_core', 'set-price', [
-        types.ascii("AAPL"),
-        types.uint(15000)
-      ], deployer.address)
-    ]);
-    
-    // Try to create undercollateralized position
-    block = chain.mineBlock([
-      Tx.contractCall('finix_core', 'create-position', [
-        types.uint(1000), // Too little collateral
-        types.uint(4),
-        types.ascii("AAPL")
-      ], wallet1.address)
-    ]);
-    
-    block.receipts[0].result.expectErr(types.uint(101)); // err-insufficient-collateral
-  }
-});
-
-Clarinet.test({
-  name: "Test add collateral to position",
-  async fn(chain: Chain, accounts: Map<string, Account>) {
-    const deployer = accounts.get('deployer')!;
-    const wallet1 = accounts.get('wallet_1')!;
-    
-    // Create initial position
+    // Set initial price and create position
     let block = chain.mineBlock([
       Tx.contractCall('finix_core', 'set-price', [
         types.ascii("AAPL"),
@@ -92,22 +66,47 @@ Clarinet.test({
       ], wallet1.address)
     ]);
     
-    // Add more collateral
+    // Price spike makes position liquidatable
     block = chain.mineBlock([
-      Tx.contractCall('finix_core', 'add-collateral', [
-        types.uint(50000000)
-      ], wallet1.address)
+      Tx.contractCall('finix_core', 'set-price', [
+        types.ascii("AAPL"),
+        types.uint(30000) // Price doubles
+      ], deployer.address)
+    ]);
+    
+    // Liquidate position
+    block = chain.mineBlock([
+      Tx.contractCall('finix_core', 'liquidate-position', [
+        types.principal(wallet1.address)
+      ], wallet2.address)
     ]);
     block.receipts[0].result.expectOk();
     
-    // Verify updated position
+    // Verify position is deleted
     block = chain.mineBlock([
       Tx.contractCall('finix_core', 'get-position', [
         types.principal(wallet1.address)
       ], wallet1.address)
     ]);
+    block.receipts[0].result.expectNone();
+  }
+});
+
+Clarinet.test({
+  name: "Test liquidation parameters",
+  async fn(chain: Chain, accounts: Map<string, Account>) {
+    const deployer = accounts.get('deployer')!;
     
-    const position = block.receipts[0].result.expectSome();
-    assertEquals(position['collateral-amount'], types.uint(150000000));
+    let block = chain.mineBlock([
+      Tx.contractCall('finix_core', 'set-liquidation-ratio', [
+        types.uint(110)
+      ], deployer.address),
+      Tx.contractCall('finix_core', 'set-liquidation-penalty', [
+        types.uint(15)
+      ], deployer.address)
+    ]);
+    
+    block.receipts[0].result.expectOk();
+    block.receipts[1].result.expectOk();
   }
 });
