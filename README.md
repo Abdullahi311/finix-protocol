@@ -12,12 +12,21 @@ Finix allows users to create synthetic assets that track the price of real-world
 - Advanced liquidation mechanism with configurable parameters
 - Incentivized liquidations with rewards for liquidators
 - Governance controls for risk parameters
+- Comprehensive safety checks and input validation
 
-## Architecture
+## Architecture 
 The protocol consists of the following key components:
 - Core contract: Handles creation and management of synthetic positions
 - Oracle contract: Provides price feeds for underlying assets 
 - Liquidation mechanism: Automated system for managing undercollateralized positions
+- Safety module: Input validation and parameter boundary checks
+
+## Safety Features
+The protocol implements multiple safety checks:
+- Zero amount validation for all operations
+- Ratio boundary validation for risk parameters
+- Logical constraints between collateral and liquidation ratios
+- Maximum bounds on penalty percentages
 
 ## Liquidation Mechanism
 The protocol implements an advanced liquidation system with the following features:

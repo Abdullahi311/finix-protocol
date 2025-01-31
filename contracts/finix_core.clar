@@ -9,6 +9,8 @@
 (define-constant err-invalid-price (err u103))
 (define-constant err-not-liquidatable (err u104))
 (define-constant err-insufficient-balance (err u105))
+(define-constant err-zero-amount (err u106))
+(define-constant err-invalid-ratio (err u107))
 
 ;; Data vars 
 (define-data-var minimum-collateral-ratio uint u150) ;; 150% collateralization required
@@ -33,19 +35,19 @@
     (asset-price (unwrap! (get-price asset-identifier) err-invalid-price))
     (required-collateral (calculate-required-collateral synthetic-amount asset-price))
   )
-    (if (>= collateral-amount required-collateral)
-      (begin 
-        (try! (stx-transfer? collateral-amount tx-sender (as-contract tx-sender)))
-        (map-set synthetic-positions tx-sender
-          {
-            collateral-amount: collateral-amount,
-            synthetic-amount: synthetic-amount,
-            asset-identifier: asset-identifier
-          }
-        )
-        (ok true))
-      err-insufficient-collateral
-    )
+    (asserts! (> collateral-amount u0) err-zero-amount)
+    (asserts! (> synthetic-amount u0) err-zero-amount)
+    (asserts! (>= collateral-amount required-collateral) err-insufficient-collateral)
+    (begin 
+      (try! (stx-transfer? collateral-amount tx-sender (as-contract tx-sender)))
+      (map-set synthetic-positions tx-sender
+        {
+          collateral-amount: collateral-amount,
+          synthetic-amount: synthetic-amount,
+          asset-identifier: asset-identifier
+        }
+      )
+      (ok true))
   )
 )
 
@@ -54,6 +56,7 @@
   (let (
     (position (unwrap! (map-get? synthetic-positions tx-sender) err-position-not-found))
   )
+    (asserts! (> amount u0) err-zero-amount)
     (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
     (map-set synthetic-positions tx-sender
       (merge position {
@@ -119,41 +122,37 @@
 
 ;; Admin functions
 (define-public (set-price (asset-identifier (string-ascii 12)) (price uint))
-  (if (is-eq tx-sender contract-owner)
-    (begin
-      (map-set price-feeds asset-identifier price)
-      (ok true)
-    )
-    err-owner-only
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (> price u0) err-zero-amount)
+    (map-set price-feeds asset-identifier price)
+    (ok true)
   )
 )
 
 (define-public (set-minimum-collateral-ratio (new-ratio uint))
-  (if (is-eq tx-sender contract-owner)
-    (begin
-      (var-set minimum-collateral-ratio new-ratio)
-      (ok true)
-    )
-    err-owner-only
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (>= new-ratio (var-get liquidation-ratio)) err-invalid-ratio)
+    (var-set minimum-collateral-ratio new-ratio)
+    (ok true)
   )
 )
 
 (define-public (set-liquidation-ratio (new-ratio uint))
-  (if (is-eq tx-sender contract-owner)
-    (begin 
-      (var-set liquidation-ratio new-ratio)
-      (ok true)
-    )
-    err-owner-only
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only) 
+    (asserts! (< new-ratio (var-get minimum-collateral-ratio)) err-invalid-ratio)
+    (var-set liquidation-ratio new-ratio)
+    (ok true)
   )
 )
 
 (define-public (set-liquidation-penalty (new-penalty uint))
-  (if (is-eq tx-sender contract-owner)
-    (begin
-      (var-set liquidation-penalty new-penalty)
-      (ok true)
-    )
-    err-owner-only
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (<= new-penalty u100) err-invalid-ratio)
+    (var-set liquidation-penalty new-penalty)
+    (ok true)
   )
 )
