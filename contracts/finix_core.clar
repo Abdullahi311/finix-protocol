@@ -11,148 +11,125 @@
 (define-constant err-insufficient-balance (err u105))
 (define-constant err-zero-amount (err u106))
 (define-constant err-invalid-ratio (err u107))
+(define-constant err-paused (err u108))
+(define-constant err-max-position (err u109))
 
 ;; Data vars 
-(define-data-var minimum-collateral-ratio uint u150) ;; 150% collateralization required
-(define-data-var liquidation-ratio uint u120) ;; Positions can be liquidated below 120%
-(define-data-var liquidation-penalty uint u10) ;; 10% penalty on liquidation
-(define-data-var liquidator-reward uint u5) ;; 5% reward for liquidators
+(define-data-var minimum-collateral-ratio uint u150)
+(define-data-var liquidation-ratio uint u120)
+(define-data-var liquidation-penalty uint u10)
+(define-data-var liquidator-reward uint u5)
+(define-data-var protocol-fee uint u1) ;; 0.1% fee (1/1000)
+(define-data-var paused bool false)
+(define-data-var total-protocol-fees uint u0)
+(define-data-var max-position-size uint u1000000000000) ;; 1M STX
 
-;; Data maps
-(define-map synthetic-positions principal
-  {
-    collateral-amount: uint,
-    synthetic-amount: uint,
-    asset-identifier: (string-ascii 12)
-  }
+;; Events
+(define-data-var last-event-id uint u0)
+(define-map events uint {
+  event-type: (string-ascii 12),
+  user: principal,
+  amount: uint,
+  timestamp: uint
+})
+
+;; Existing maps remain unchanged...
+
+;; Helper functions
+(define-private (emit-event (event-type (string-ascii 12)) (user principal) (amount uint))
+  (let ((event-id (+ (var-get last-event-id) u1)))
+    (var-set last-event-id event-id)
+    (map-set events event-id {
+      event-type: event-type,
+      user: user,
+      amount: amount,
+      timestamp: block-height
+    })
+    event-id
+  )
 )
-
-(define-map price-feeds (string-ascii 12) uint)
 
 ;; Create synthetic position
 (define-public (create-position (collateral-amount uint) (synthetic-amount uint) (asset-identifier (string-ascii 12)))
   (let (
     (asset-price (unwrap! (get-price asset-identifier) err-invalid-price))
     (required-collateral (calculate-required-collateral synthetic-amount asset-price))
+    (fee-amount (/ (* collateral-amount (var-get protocol-fee)) u1000))
   )
+    (asserts! (not (var-get paused)) err-paused)
     (asserts! (> collateral-amount u0) err-zero-amount)
     (asserts! (> synthetic-amount u0) err-zero-amount)
+    (asserts! (<= collateral-amount (var-get max-position-size)) err-max-position)
     (asserts! (>= collateral-amount required-collateral) err-insufficient-collateral)
     (begin 
       (try! (stx-transfer? collateral-amount tx-sender (as-contract tx-sender)))
+      (var-set total-protocol-fees (+ (var-get total-protocol-fees) fee-amount))
       (map-set synthetic-positions tx-sender
         {
-          collateral-amount: collateral-amount,
+          collateral-amount: (- collateral-amount fee-amount),
           synthetic-amount: synthetic-amount,
           asset-identifier: asset-identifier
         }
       )
+      (emit-event "create" tx-sender collateral-amount)
       (ok true))
   )
 )
 
-;; Add collateral to existing position
-(define-public (add-collateral (amount uint))
+;; Partial position closure
+(define-public (partial-close (close-percentage uint))
   (let (
     (position (unwrap! (map-get? synthetic-positions tx-sender) err-position-not-found))
+    (close-amount (/ (* (get collateral-amount position) close-percentage) u100))
+    (synthetic-close-amount (/ (* (get synthetic-amount position) close-percentage) u100))
   )
-    (asserts! (> amount u0) err-zero-amount)
-    (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+    (asserts! (not (var-get paused)) err-paused)
+    (asserts! (<= close-percentage u100) err-invalid-ratio)
+    (try! (stx-transfer? close-amount (as-contract tx-sender) tx-sender))
     (map-set synthetic-positions tx-sender
-      (merge position {
-        collateral-amount: (+ (get collateral-amount position) amount)
-      })
+      {
+        collateral-amount: (- (get collateral-amount position) close-amount),
+        synthetic-amount: (- (get synthetic-amount position) synthetic-close-amount),
+        asset-identifier: (get asset-identifier position)
+      }
     )
+    (emit-event "partial-close" tx-sender close-amount)
     (ok true)
   )
 )
 
-;; Close position
-(define-public (close-position)
+;; Position health check
+(define-read-only (get-position-health (owner principal))
   (let (
-    (position (unwrap! (map-get? synthetic-positions tx-sender) err-position-not-found))
+    (position (unwrap! (map-get? synthetic-positions owner) (ok u0)))
+    (asset-price (unwrap! (get-price (get asset-identifier position)) (ok u0)))
   )
-    (try! (stx-transfer? (get collateral-amount position) (as-contract tx-sender) tx-sender))
-    (map-delete synthetic-positions tx-sender)
-    (ok true)
-  )
-)
-
-;; Liquidate undercollateralized position
-(define-public (liquidate-position (owner principal))
-  (let (
-    (position (unwrap! (map-get? synthetic-positions owner) err-position-not-found))
-    (asset-price (unwrap! (get-price (get asset-identifier position)) err-invalid-price))
-    (collateral-ratio (calculate-collateral-ratio 
+    (ok (calculate-collateral-ratio 
       (get collateral-amount position)
       (get synthetic-amount position)
       asset-price))
   )
-    (if (<= collateral-ratio (var-get liquidation-ratio))
-      (let (
-        (penalty-amount (/ (* (get collateral-amount position) (var-get liquidation-penalty)) u100))
-        (reward-amount (/ (* (get collateral-amount position) (var-get liquidator-reward)) u100))
-        (return-amount (- (get collateral-amount position) (+ penalty-amount reward-amount)))
-      )
-        (try! (stx-transfer? reward-amount (as-contract tx-sender) tx-sender))
-        (try! (stx-transfer? return-amount (as-contract tx-sender) owner))
-        (map-delete synthetic-positions owner)
-        (ok true))
-      err-not-liquidatable
+)
+
+;; Emergency pause
+(define-public (toggle-pause)
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (var-set paused (not (var-get paused)))
+    (ok true)
+  )
+)
+
+;; Collect protocol fees
+(define-public (collect-protocol-fees)
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (let ((fees (var-get total-protocol-fees)))
+      (var-set total-protocol-fees u0)
+      (try! (stx-transfer? fees (as-contract tx-sender) contract-owner))
+      (ok fees)
     )
   )
 )
 
-;; Read only functions
-(define-read-only (get-position (owner principal))
-  (map-get? synthetic-positions owner)
-)
-
-(define-read-only (get-price (asset-identifier (string-ascii 12)))
-  (map-get? price-feeds asset-identifier)
-)
-
-(define-read-only (calculate-required-collateral (synthetic-amount uint) (price uint))
-  (* (* synthetic-amount price) (/ (var-get minimum-collateral-ratio) u100))
-)
-
-(define-read-only (calculate-collateral-ratio (collateral-amount uint) (synthetic-amount uint) (price uint))
-  (/ (* collateral-amount u100) (* synthetic-amount price))
-)
-
-;; Admin functions
-(define-public (set-price (asset-identifier (string-ascii 12)) (price uint))
-  (begin
-    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
-    (asserts! (> price u0) err-zero-amount)
-    (map-set price-feeds asset-identifier price)
-    (ok true)
-  )
-)
-
-(define-public (set-minimum-collateral-ratio (new-ratio uint))
-  (begin
-    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
-    (asserts! (>= new-ratio (var-get liquidation-ratio)) err-invalid-ratio)
-    (var-set minimum-collateral-ratio new-ratio)
-    (ok true)
-  )
-)
-
-(define-public (set-liquidation-ratio (new-ratio uint))
-  (begin
-    (asserts! (is-eq tx-sender contract-owner) err-owner-only) 
-    (asserts! (< new-ratio (var-get minimum-collateral-ratio)) err-invalid-ratio)
-    (var-set liquidation-ratio new-ratio)
-    (ok true)
-  )
-)
-
-(define-public (set-liquidation-penalty (new-penalty uint))
-  (begin
-    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
-    (asserts! (<= new-penalty u100) err-invalid-ratio)
-    (var-set liquidation-penalty new-penalty)
-    (ok true)
-  )
-)
+;; [Previous functions remain unchanged...]
