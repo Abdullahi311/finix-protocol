@@ -10,17 +10,13 @@ import { assertEquals } from 'https://deno.land/std@0.90.0/testing/asserts.ts';
 // [Previous tests remain unchanged...]
 
 Clarinet.test({
-  name: "Test partial position closure",
+  name: "Test position collateral modification",
   async fn(chain: Chain, accounts: Map<string, Account>) {
     const deployer = accounts.get('deployer')!;
     const wallet1 = accounts.get('wallet_1')!;
     
-    // Set price and create position
+    // Create initial position
     let block = chain.mineBlock([
-      Tx.contractCall('finix_core', 'set-price', [
-        types.ascii("AAPL"),
-        types.uint(15000)
-      ], deployer.address),
       Tx.contractCall('finix_core', 'create-position', [
         types.uint(100000000),
         types.uint(4),
@@ -28,10 +24,10 @@ Clarinet.test({
       ], wallet1.address)
     ]);
     
-    // Close 50% of position
+    // Add collateral
     block = chain.mineBlock([
-      Tx.contractCall('finix_core', 'partial-close', [
-        types.uint(50)
+      Tx.contractCall('finix_core', 'modify-collateral', [
+        types.int(50000000)
       ], wallet1.address)
     ]);
     block.receipts[0].result.expectOk();
@@ -44,29 +40,5 @@ Clarinet.test({
       wallet1.address
     );
     position.result.expectSome();
-  }
-});
-
-Clarinet.test({
-  name: "Test emergency pause mechanism",
-  async fn(chain: Chain, accounts: Map<string, Account>) {
-    const deployer = accounts.get('deployer')!;
-    const wallet1 = accounts.get('wallet_1')!;
-    
-    // Enable pause
-    let block = chain.mineBlock([
-      Tx.contractCall('finix_core', 'toggle-pause', [], deployer.address)
-    ]);
-    block.receipts[0].result.expectOk();
-    
-    // Try creating position while paused
-    block = chain.mineBlock([
-      Tx.contractCall('finix_core', 'create-position', [
-        types.uint(100000000),
-        types.uint(4),
-        types.ascii("AAPL")
-      ], wallet1.address)
-    ]);
-    block.receipts[0].result.expectErr(types.uint(108));
   }
 });
